@@ -1,0 +1,627 @@
+---
+title: "MLB Pitch Prediction"
+author: "John F. Adamek"
+date: "`r Sys.Date()`"
+output: pdf_document
+
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(tree)
+library(caTools)
+library(caret)
+library(class)
+library(e1071)
+library(Hmisc)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, linewidth = 80)
+
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+```
+
+## Introduction
+
+The use of machine learning models in baseball have become popular thanks to the efficient 'learning' capabilities of these models to learn what an outcome (e.g., pitch type) should be based on a number of features (e.g., initial speed, horizontal break) fed into the model. This is considered training the model. The goal is to train a model to be as accurate as possible when predicting an outcome. Here I show a basic example of using general and pitcher-specific machine learning models to predict a pitcher's pitch type (i.e., two-seam fastball, four-seam fastball, curveball) based on the characteristics of the pitch. The data consists of six different pitchers. 
+
+
+## Machine Learning Layout
+
+Goal: Give the most likely pitch type for all of the pitches in the test dataset using information from the training dataset.
+
+The goal is to predict the type of pitch from the training set by only given a numerical value associated with the pitch type and not the actual name. This will be done through a series of steps:
+
+**Step 1:** Check and visualize the data. 
+
+**Step 2:** Prepare the data to be fitted to each of the models.
+
+**Step 3:** Evaluate model performance by examining its accuracy in predicting pitch type in the testing dataset
+
+**Step 4:** Determine the model with the highest accuracy scores to predict pitch type in the testing dataset
+
+**Step 5:** Make final predictions 
+
+**Step 6:** Check and visualize the predicted results to the original data. To see if patterns match.
+
+### Methods
+
+**Step 1:** The first step is to look at and visualize the data. What are the variables in the provided dataset? The basic descriptive means of the independent variables and observations for each pitcher were displayed. Findings show that the pitchers in this dataset are likely to be right handed pitchers due to their release point (initposx) being on the third base side of the pitching rubber (Tables 2 and 4).Additionally, we can see that pitch type 9 and 10 are most likely refer to fastballs due to greater initial speed with pitch type 9 associated with a 2-seam fastball/sinker and pitch type 10 associated with a 4-seam fastball based on greater horizontal movement towards a right-handed hitter (breakx) for type 9 and lesser vertical movements downward (breakz) for type 10. Furthermore, Pitcher 3 has only 12 observations (pitches) in the train set which is not an efficient sample size to train and test a model for future predictions. Therefore, I will take this in consideration when determining the model to be used for final predictions. I will test separate models for individual pitchers and the total model performance for addressing Pitcher 3 and Pitcher 6. As expected, the correlation matrix show's significant (p < .05) correlations amongst independent variables ruling out regression based models such as logistic regression. 
+
+Based on the data and research question, I will fit and evaluate the performance of three machine learning classification algorithms: decision tree (DT), k-nearest neighbor (K-NN), and support vector machine (SVM).
+
+\begin{table}[h]
+    \centering
+    \caption{Pitch Classification Dataset}
+    \begin{tabular}{l c}
+    \hline
+    Variables & Description \\
+    \hline
+    pitchid & a unique identifier for each pitch \\
+    pitcherid & identity of the pitcher (1-6) \\
+    yearid & year in which the pitch occurred (1-3) \\
+    height (in) & height in inches of the pitcher \\
+    initspeed (MPH) & initial speed of the pitch as it leaves the pitcher's hand \\
+    breakx (in) & horizontal distance where a pitch crossed the plate in relation to a hypothetical spinless pitch \\
+    breakz (in) & vertical distance where a pitch crossed the plate in relation to a hypothetical spinless pitch  \\
+    initposx (ft) & horizontal position of the release point of the pitch \\
+    initposz (ft) & vertical position of the release point of the pitch \\
+    extension (ft) & distance in front of the pitching rubber the pitcher releases the ball \\
+    spinrate (RPM) & how fast the ball is spinning as it leaves the pitcher's hand \\
+    type & type of pitch that was thrown \\
+    \hline
+    \end{tabular}
+    \label{tab:my_label}
+\end{table}
+
+
+```{r}
+############################ Input Data ##########################
+path <- setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+file1 <-"/pitchclassificationtrain.csv"
+file2 <- "/pitchclassificationtest.csv"
+train <- read.csv(paste0(path,file1))
+test <- read.csv(paste0(path,file2))
+rm(file1, file2, path)
+##################################################################
+
+# Clean Data
+train$type <- factor(train$type)
+train$pitcherid <- factor(train$pitcherid) #added from KNN 
+# Means of current data
+tablemean <- train %>% 
+  group_by(type) %>% 
+  summarise(mph = mean(initspeed),
+            spin = mean(spinrate),
+            breakx = mean(breakx),
+            breakz = mean(breakz),
+            initx = mean(initposx),
+            initz = mean(initposz),
+            ext = mean(extension))
+
+# Total observations
+totalobs <- train %>% 
+  group_by(pitcherid) %>% 
+  summarise(N = n())
+# Descriptives of Individual SP Type
+SP_type <- train %>% 
+  group_by(pitcherid, type) %>% 
+  summarise(mph = mean(initspeed),
+            spin = mean(spinrate),
+            breakx = mean(breakx),
+            breakz = mean(breakz),
+            initx = mean(initposx),
+            initz = mean(initposz),
+            ext = mean(extension),
+            pitches = n())
+SP_type$Pitcher <- c("Pitcher1", "", "", "", "Pitcher2", "", "", "", "Pitcher3", "", "", "Pitcher4", "", "", "", "", 'Pitcher5', "", "", "", "", "", "")
+SP_type <- SP_type %>% 
+  ungroup() %>% 
+  select(Pitcher,type:pitches)
+
+# Correlations among variables
+source("C:/Users/jadam/Box/R_codes/correlation_matrix.R") 
+# Run correlation matrix
+cor_matrixFR <- as.data.frame(correlation_matrix(train[, -c(1:4,12)], digits = 2, use = 'lower', replace_diagonal = TRUE))
+
+# Table of total means
+knitr::kable(tablemean, align = "c", caption = 'Basic Means of Variables', digits = 3) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+
+# Table of Total observations
+knitr::kable(totalobs, align = "c", caption = 'Total Observations(pitches) for each Pitcher in Training Set', digits = 3) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position") %>% 
+  footnote(general = 'Pitcher 3 has n=12 observations', general_title = "Note", footnote_as_chunk = T)
+
+# Table of Each SP's descriptives
+knitr::kable(SP_type, align = "c", caption = 'Means of Variables for Individual Pitcher by Type', digits = 3) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position") 
+
+# Table of Each SP's descriptives
+knitr::kable(cor_matrixFR, align = "c", caption = 'Correlation Matrix of Independent Variables', digits = 3) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+
+```
+
+
+```{r 3.3 Visualizations, fig.align ='center', out.width = '100%'}
+
+#ggplot(train, aes(x=type, y=breakx, fill=type))+
+#  geom_boxplot()+
+#  ggtitle("Pitch Type vs Horizontal Break")+
+#  xlab("Pitch Type")+
+#  ylab("Horizontal Break")
+# Visualize MPH vs spin rate
+ggplot(train) +
+  geom_point(mapping = aes(x=initspeed, y= spinrate, color = type)) +
+  xlab("MPH") +
+  ylab("SpinRate") +
+  ggtitle("Visualization of MPH vs Spinrate for Pitch Types") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(train, aes(initspeed, breakx, color = type))+
+  geom_point()+
+  ggtitle("Visualization of MPH vs Horizontal Break")+
+  xlab("MPH")+
+  ylab("Horizontal Break") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+
+### Data Preparation
+
+
+**Step 2:** The independent variables were first normalized to ensure the units were properly scaled.  Prior to determining which algorithm to use for predicting the final pitch type, the dataset was split (75%/25%) into a training and testing set in order to evaluate model performance for the three different machine learning algorithms. The training set will be used to train each of the models which would then predict pitch type on the testing set. Model performance is evaluated based on the models ability to accurately predict the pitch type in the testing set. In addition, the training set was further separated for each of the five pitchers to run six separate models (five for each pitcher and one with data from all five pitchers) for the DT and K-NN. Models will be evaluated and compared based on their ability to accurately predict pitch type in the testing set. Because Pitcher 6 does not have any data to train on, total model performance will be used to predict pitch type for Pitcher 6 in the testing dataset. Additionally, due to the limited amount of data available for Pitcher 3, I expect to use the total model performance to predict pitch type for Pitcher 3 in the testing dataset as well. If accuracy for the total model is greater then accuracy for the separate models, the total model will be used to predict performance for all pitchers. Otherwise, the individual pitcher data will be used to predict that pitchers pitch type in the testing dataset. For instance, if the K-NN model had a greater predicted pitch type accuracy for Pitcher 2 compared to the total K-NN model then the model for Pitcher 2 will be used to predict pitch type for Pitcher 2 in the testing dataset. 
+
+
+### Models
+
+**Step 3:** For each of the three algorithms, separate models were trained on the training set and then predictions were made on the testing set (with the dependent variable, pitch type, removed). The results from the models predictions were compared to the actual results with performance being represented by an accuracy percentage.
+
+**Decision Tree**
+
+Six separate decision tree's were created, five for each pitcher and a total model using data from all five pitchers. After training the data for each model and making predictions on the testing set, the total model performance was 84% accurate in predicting pitch type. Greater performance was found for the separate models for Pitcher 1 (93%), Pitcher 2 (94%), Pitcher 4 (87%), and Pitcher 5 (88%) with an expected low accuracy of 66.67% for Pitcher 3 (Table 5).  
+
+
+```{r Decision Tree}
+# Set up dataset for 6 different models 
+trainM <- train %>% 
+  select(initspeed:type)
+SP1 <- train %>% 
+  filter(pitcherid == 1) %>% 
+  select(initspeed:type)
+SP2 <- train %>% 
+  filter(pitcherid == 2) %>% 
+  select(initspeed:type)
+SP3 <- train %>% 
+  filter(pitcherid == 3) %>% 
+  select(initspeed:type)  
+SP4 <- train %>% 
+  filter(pitcherid == 4) %>% 
+  select(initspeed:type)  
+SP5 <- train %>% 
+  filter(pitcherid == 5) %>% 
+  select(initspeed:type)
+# Decision Tree
+treeM <- tree(type ~ ., data = trainM)
+sp1D <- tree(type ~ ., data = SP1)
+sp2D <- tree(type ~ ., data = SP2)
+sp3D <- tree(type ~ ., data = SP3)
+sp4D <- tree(type ~ ., data = SP4)
+sp5D <- tree(type ~ ., data = SP5)
+# Misclassifications  
+missclassM <- summary(treeM)[[7]][1]/summary(treeM)[[7]][2]
+missclass1 <- summary(sp1D)[[7]][1]/summary(sp1D)[[7]][2]
+missclass2 <- summary(sp2D)[[7]][1]/summary(sp2D)[[7]][2]
+missclass3 <- summary(sp3D)[[7]][1]/summary(sp3D)[[7]][2]
+missclass4 <- summary(sp4D)[[7]][1]/summary(sp4D)[[7]][2]
+missclass5 <- summary(sp5D)[[7]][1]/summary(sp5D)[[7]][2]
+
+# Model Accuracy
+##Split training data into training and testing set 
+set.seed(27)
+splitM = sample.split(trainM$type, SplitRatio = 0.75)
+split1 = sample.split(SP1$type, SplitRatio = 0.75)
+split2 = sample.split(SP2$type, SplitRatio = 0.75)
+split3 = sample.split(SP3$type, SplitRatio = 0.75)
+split4 = sample.split(SP4$type, SplitRatio = 0.75)
+split5 = sample.split(SP5$type, SplitRatio = 0.75)
+##Training & Test set
+training_set = subset(trainM, splitM == TRUE)
+test_set = subset(trainM, splitM == FALSE)
+training_set1 = subset(SP1, split1 == TRUE)
+test_set1 = subset(SP1, split1 == FALSE)
+training_set2 = subset(SP2, split2 == TRUE)
+test_set2 = subset(SP2, split2 == FALSE)
+training_set3 = subset(SP3, split3 == TRUE)
+test_set3 = subset(SP3, split3 == FALSE)
+training_set4 = subset(SP4, split4 == TRUE)
+test_set4 = subset(SP4, split4 == FALSE)
+training_set5 = subset(SP5, split5 == TRUE)
+test_set5 = subset(SP5, split5== FALSE)
+## Training Tree 
+treeD_training <- tree(type ~ ., training_set)
+sp1D_training <- tree(type ~ ., training_set1)
+sp2D_training <- tree(type ~ ., training_set2)
+sp3D_training <- tree(type ~ ., training_set3)
+sp4D_training <- tree(type ~ ., training_set4)
+sp5D_training <- tree(type ~ ., training_set5)
+## Make predictions on the test set
+tree.predM = predict(treeD_training, test_set[,-8], type="class")
+tree.pred1 = predict(sp1D_training, test_set1[,-8], type="class")
+tree.pred2 = predict(sp2D_training, test_set2[,-8], type="class")
+tree.pred3 = predict(sp3D_training, test_set3[,-8], type="class")
+tree.pred4 = predict(sp4D_training, test_set4[,-8], type="class")
+tree.pred5 = predict(sp5D_training, test_set5[,-8], type="class")
+##Accuracy
+m <- confusionMatrix(table(tree.predM, test_set$type))$overall[1]
+m1 <- confusionMatrix(table(tree.pred1, test_set1$type))$overall[1]
+m2 <- confusionMatrix(table(tree.pred2, test_set2$type))$overall[1]
+m3 <- confusionMatrix(table(tree.pred3, test_set3$type))$overall[1]
+m4 <- confusionMatrix(table(tree.pred4, test_set4$type))$overall[1]
+m5 <- confusionMatrix(table(tree.pred5, test_set5$type))$overall[1]
+
+# Table of DT
+dtmodel <- data.frame(Model = c('Total Model', 'Pitcher1', 'Pitcher2', 'Pitcher3', 'Pitcher4', 'Pitcher5'),
+                 Accuracy = c(m,m1,m2,m3,m4,m5))
+
+
+```
+
+
+```{r fig.height = 6, fig.width = 10.5, out.width = '100%'}
+# Plot the decison Tree of the total Model
+plot(treeD_training)
+text(treeD_training, cex= 1.1)
+mtext("Decision Tree of the Total Training Set", line = 1, cex = 1.5)
+
+# Kable of DT
+knitr::kable(dtmodel, align = "c", caption = 'Decision Tree Model Performance', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position") 
+```
+
+
+**K-Nearest Neighbor**
+
+The same six separate model approach was used to train and test the data using K-NN. The K-NN algorithm greatly improved the predictive performance for the total model and each of the separate pitcher models (other than Pitcher 3). Total model accurately predicted 91% of the pitch type in the testing set with Pitcher 1 (96%), Pitcher 2 (96%), Pitcher 4 (93%), and Pitcher 5 (90%) all having greater accuracy then the decision tree model performance.
+
+```{r KNN}
+# Functions
+# Normalize function
+normfun <- function(x){
+  return((x - min(x)) / (max(x) - min(x)))
+}
+# PreProcess function
+preprocess <- function(x){
+  
+  train.n <- as.data.frame(lapply(x[, -c(1,9)], normfun))
+  train.n$type <- x$type
+  # Split Train Data to test model
+  set.seed(27)
+  split = sample.split(train.n$type, SplitRatio = 0.75)
+  training_set = subset(train.n, split == TRUE)
+  test_set = subset(train.n, split == FALSE)
+  return(list(training_set, test_set))
+}
+
+# Subset data for the separate models
+trainM_knn <- train %>% 
+  select(pitcherid,initspeed:type)
+SP1_knn <- train %>% 
+  filter(pitcherid == 1) %>% 
+  select(pitcherid,initspeed:type)
+SP2_knn <- train %>% 
+  filter(pitcherid == 2) %>% 
+  select(pitcherid,initspeed:type)
+SP3_knn <- train %>% 
+  filter(pitcherid == 3) %>% 
+  select(pitcherid,initspeed:type)
+SP4_knn <- train %>% 
+  filter(pitcherid == 4) %>% 
+  select(pitcherid,initspeed:type)
+SP5_knn <- train %>% 
+  filter(pitcherid == 5) %>% 
+  select(pitcherid,initspeed:type)
+
+##Split training data into training and testing set  
+# Total model
+dfL <- preprocess(trainM_knn)
+training_setk <-dfL[[1]]
+test_setk <- dfL[[2]]
+# SP1
+dfL <- preprocess(SP1_knn)
+training_setk1 <-dfL[[1]]
+test_setk1 <- dfL[[2]]
+# SP 2
+dfL <- preprocess(SP2_knn)
+training_setk2 <-dfL[[1]]
+test_setk2 <- dfL[[2]]
+# SP 3
+dfL <- preprocess(SP3_knn)
+training_setk3 <-dfL[[1]]
+test_setk3 <- dfL[[2]]
+# SP 4
+dfL <- preprocess(SP4_knn)
+training_setk4 <-dfL[[1]]
+test_setk4 <- dfL[[2]]
+# SP 5
+dfL <- preprocess(SP5_knn)
+training_setk5 <-dfL[[1]]
+test_setk5 <- dfL[[2]]
+
+# Build KNN Model
+knn.M = knn(train = training_setk[, -8],
+              test = test_setk[, -8],
+              cl = training_setk[, 8],
+              k = 3,
+              prob = TRUE)
+# SP1
+knn.1 = knn(train = training_setk1[, -8],
+             test = test_setk1[, -8],
+             cl = training_setk1[, 8],
+             k = 9,
+             prob = TRUE)
+# SP2
+knn.2 = knn(train = training_setk2[, -8],
+             test = test_setk2[, -8],
+             cl = training_setk2[, 8],
+             k = 5,
+             prob = TRUE)
+# SP3
+knn.3 = knn(train = training_setk3[, -8],
+             test = test_setk3[, -8],
+             cl = training_setk3[, 8],
+             k = 3,
+             prob = TRUE)
+# SP4
+knn.4 = knn(train = training_setk4[, -8],
+             test = test_setk4[, -8],
+             cl = training_setk4[, 8],
+             k = 5,
+             prob = TRUE)
+# SP5
+knn.5 = knn(train = training_setk5[, -8],
+             test = test_setk5[, -8],
+             cl = training_setk5[, 8],
+             k = 5,
+             prob = TRUE)
+
+# Model Evaluation
+am <- confusionMatrix(table(knn.M,test_setk[, 8]))$overall[1]
+m1 <- confusionMatrix(table(knn.1,test_setk1[, 8]))$overall[1]
+m2 <- confusionMatrix(table(knn.2,test_setk2[, 8]))$overall[1]
+m3 <- confusionMatrix(table(knn.3,test_setk3[, 8]))$overall[1]
+m4 <- confusionMatrix(table(knn.4,test_setk4[, 8]))$overall[1]
+m5 <- confusionMatrix(table(knn.5,test_setk5[, 8]))$overall[1]
+
+# Table of KNN
+knnmodel <- data.frame(Model = c('Total Model', 'Pitcher1', 'Pitcher2', 'Pitcher3', 'Pitcher4', 'Pitcher5'),
+                 Accuracy = c(am,m1,m2,m3,m4,m5))
+
+
+# Kable of KNN
+knitr::kable(knnmodel, align = "c", caption = 'K-NN Model Performance', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position") 
+
+```
+
+
+```{r KNN predictions}
+# Testing
+SP1testkn <- test %>% 
+  filter(pitcherid == 1) 
+SP2testkn <- test %>% 
+  filter(pitcherid == 2) 
+SP4testkn <- test %>% 
+  filter(pitcherid == 4) 
+SP5testkn <- test %>% 
+  filter(pitcherid == 5)
+
+# Total Model (to be used for SP3 and SP6)
+final_pred = knn(train = train[, -c(1:4,12)],
+                 test = test[, -c(1:4,12)],
+                 cl = train[, 12],
+                 k = 3,
+                 prob = TRUE)
+testkn <- test
+testkn$PitchPredKNN <- final_pred
+
+# Pitcher 1
+final_pred1 = knn(train = SP1_knn[, -c(1,9)],
+             test = SP1testkn[, -c(1:4, 12)],
+             cl = SP1_knn[, 9],
+             k = 3,
+             prob = TRUE)
+SP1testkn$PitchPredKNN <- final_pred1
+# Pitcher 2
+final_pred2 = knn(train = SP2_knn[, -c(1,9)],
+             test = SP2testkn[, -c(1:4, 12)],
+             cl = SP2_knn[, 9],
+             k = 3,
+             prob = TRUE)
+SP2testkn$PitchPredKNN <- final_pred2
+# Pitcher 4
+final_pred4 = knn(train = SP4_knn[, -c(1,9)],
+             test = SP4testkn[, -c(1:4, 12)],
+             cl = SP4_knn[, 9],
+             k = 3,
+             prob = TRUE)
+SP4testkn$PitchPredKNN <- final_pred4
+# Pitcher 5
+final_pred5 = knn(train = SP5_knn[, -c(1,9)],
+             test = SP5testkn[, -c(1:4, 12)],
+             cl = SP5_knn[, 9],
+             k = 3,
+             prob = TRUE)
+SP5testkn$PitchPredKNN <- final_pred5
+# Pitcher 3 and 6
+SP3testkn <- testkn %>% 
+  filter(pitcherid == 3) 
+# Pitcher 6
+SP6testkn <- testkn %>% 
+  filter(pitcherid == 6) 
+
+# Merge together
+final_KN <- rbind(SP1testkn, SP2testkn, SP3testkn, SP4testkn, SP5testkn, SP6testkn)
+```
+
+
+**Support Vector Machine (SVM)**
+
+As a result of K-NN resulting in an accuracy score above 90% for each separate pitcher model, a multiclass support vector algorithm  was ran on the total model to improve the models performance for predicting Pitcher 3 and Pitcher 6 in the testing set. The SVM resulted in a slight improvement in overall model performance (92%) compared to the K-NN total model.
+
+
+```{r svm}
+# Test and Train Model
+## Split training data into training and testing set  
+splitsvm = sample.split(train$type, SplitRatio = 0.75)
+training_setsvm = subset(train, splitsvm == TRUE)
+test_setsvm = subset(train, splitsvm == FALSE)
+## Fit the model
+svm1 = svm(formula = type ~ .,
+         data = training_setsvm[, -c(1:4)],
+         type = 'C-classification',
+         kernel = 'radial')
+## Model Evaluation: Predict on test set 
+y_predsvm <- predict(svm1, test_setsvm[, -c(1:4, 12)])
+## Accuracy: Confusion Matrix
+svm_acc <- confusionMatrix(table(y_predsvm, test_setsvm$type))$overall[1]
+
+# Make Final Predictions
+## Fit the model
+svm_M = svm(formula = type ~ .,
+         data = train[, -c(1:4)],
+         type = 'C-classification',
+         kernel = 'radial')
+## Predict Pitch type on final test set
+testsvm <- test
+testsvm$PitchPred_svm <- predict(svm_M, test[, -c(1:4, 12)])
+
+# Table of SVM
+svmmodel <- data.frame(Model = c('Total Model'),
+                 Accuracy = c(svm_acc))
+
+```
+
+
+
+### Final Model Results and Predictions
+
+
+**Step 4:** The separate K-NN models for Pitcher 1, Pitcher 2, Pitcher 4, and Pitcher 5 reported accuracy scores above 90% (Table 7). Therefore, it was decided to use the total training data for each of the four pitchers to train K-NN models and make final pitch type predictions for these four pitchers in the test data set. 
+
+SVM reported the highest predictive accuracy for the total model (92%). It was therefore decided to train SVM on the total training data to make final pitch type prediction for Pitcher 6 as well as Pitcher 3 (due to low observation of training data) in the test data set. 
+
+
+```{r FinalComparisonsamongsmodels}
+# Table Comparing Models
+comp <- data.frame("Total Model" = as.numeric(c(t(dtmodel)[2], t(knnmodel)[2], svmmodel[1,2])),
+                 "Pitcher 1" = as.numeric(c(t(dtmodel)[4], t(knnmodel)[4], '')),
+                 "Pitcher 2" = as.numeric(c(t(dtmodel)[6], t(knnmodel)[6], '')),
+                 "Pitcher 3" = as.numeric(c(t(dtmodel)[8], t(knnmodel)[8], '')),
+                 "Pitcher 4" = as.numeric(c(t(dtmodel)[10], t(knnmodel)[10], '')),
+                 "Pitcher 5" = as.numeric(c(t(dtmodel)[12], t(knnmodel)[12], '')))
+
+rownames(comp) <- c("Decision Tree Model", "K-NN Model", 'SVM Model')
+
+# Kable Comparing Models
+knitr::kable(comp, align = "c", caption = 'Comparing Model Performance', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position") 
+
+  
+```
+
+\begin{table}[h]
+    \centering
+    \caption{Predicted Model Decision}
+    \begin{tabular}{l c}
+    \hline
+    Variables & Description \\
+    \hline
+    Pitcher 1 & K-NN: Pitcher specific model \\
+    Pitcher 2 & K-NN: Pitcher specific model \\
+    Pitcher 3 & SVM: Total model \\
+    Pitcher 4 & K-NN: Pitcher specific model \\
+    Pitcher 5 & K-NN: Pitcher specific model \\
+    Pitcher 6 & SVM: Total model \\
+    \hline
+    \end{tabular}
+    \label{tab:my_label}
+\end{table}
+
+
+**Step 5:** After training K-NN on the total training data for each pitcher. Final predictions were made using each of the four pitchers separate K-NN models. SVM was trained on the total training data and final predictions were made for Pitcher 3 and Pitcher 6. When final predictions were made for each pitcher, the data was merged together to produce a final data set of all pitcher's with their predicted pitcher type.
+
+
+**Step 6:** The predicted results were displayed along with the actual (i.e., training) data by pitch type and pitcher to visualize if patterns match. Although it appears that velocity had decreased from years 1-2 to year 3 (91, 92 mph vs 87, 89mpg) overall patterns appears similar (e.g., pitch 7 had the overall lowest spin rate, pitch 2 the largest vertical break). Interestingly, it appears that Pitcher 3 and Pitcher 6 are both left-handed pitchers due to both having an initial release point on the first base side of the rubber. This may reduce accuracy rating due to the fact that the data was essentially training on right-handed pitchers to predict pitch type for a left-handed pitcher.
+
+
+
+```{r FinalPredictions}
+# Extract Model specific predictions
+Finala <- final_KN %>% 
+  filter(pitcherid %in% c(1,2,3,4)) %>% 
+  rename('PredictedPitchType' = 'PitchPredKNN')
+Finalb <- testsvm %>% 
+  filter(!pitcherid %in% c(1,2,3,4)) %>% 
+  rename('PredictedPitchType' = 'PitchPred_svm')
+# Merge together
+FinalNYY <- rbind(Finala, Finalb)
+
+
+```
+
+
+
+```{r}
+# Predicted Data: Final
+NYYPred_by_pitch <- FinalNYY %>% 
+  group_by(PredictedPitchType) %>% 
+  summarise(mph = mean(initspeed),
+            spin = mean(spinrate),
+            breakx = mean(breakx),
+            breakz = mean(breakz),
+            initx = mean(initposx),
+            initz = mean(initposz),
+            ext = mean(extension))
+NYYPred_by_pitcher <- FinalNYY %>% 
+  group_by(pitcherid, PredictedPitchType) %>% 
+  summarise(mph = mean(initspeed),
+            spin = mean(spinrate),
+            breakx = mean(breakx),
+            breakz = mean(breakz),
+            initx = mean(initposx),
+            initz = mean(initposz),
+            ext = mean(extension))
+
+# Format table
+NYYPred_by_pitcher$Pitcher <- c("Pitcher1", "", "", "", "Pitcher2", "", "", "", "Pitcher3", "", "", "", "", "", "",
+                                "Pitcher4", "", "", "", "", 'Pitcher5', "", "", "", "", "", "", 'Pitcher6', "")
+NYYPred_by_pitcher <- NYYPred_by_pitcher %>% 
+  ungroup() %>% 
+  select(Pitcher,PredictedPitchType:ext)
+
+# Kable Model Comparisons - by pitch
+knitr::kable(tablemean, align = "c", caption = 'Years 1-2', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+knitr::kable(NYYPred_by_pitch, align = "c", caption = 'Final Predictions', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position") 
+# Kable Model Comparisons - by pitcher
+knitr::kable(SP_type[, -10], align = "c", caption = 'Actual Individual Pitcher by Pitch Type: Years 1-2', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+knitr::kable(NYYPred_by_pitcher, align = "c", caption = 'Predicted Individual Pitcher by Pitch Type: Year 3', digits = 2) %>% 
+  kableExtra::kable_styling(latex_options = "HOLD_position")
+```
+
